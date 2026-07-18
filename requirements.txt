@@ -1,0 +1,23 @@
+# ========================================================
+# Dependencies for SwinTrans-ConvLSTM (MHW Prediction)
+# ========================================================
+
+# Deep Learning Framework
+torch>=2.0.0            # Your env uses 2.3.0+cu121
+einops==0.8.1           # Required for Swin Transformer tensor reshaping
+
+# Data Processing & Math
+numpy==1.23.5
+pandas>=2.2.3
+scipy>=1.10.1
+scikit-learn>=1.0.2     # Required for StandardScaler and metrics
+PyWavelets>=1.6.0       # Required for SST wavelet decomposition
+
+# Earth Science & Climate Data Handling
+xarray>=2024.7.0
+netCDF4>=1.7.2          # NetCDF backend for xarray
+h5netcdf>=1.6.1
+
+# Visualization & Utils
+matplotlib>=3.5.3
+tqdm>=4.67.1            # Progress bar
