@@ -33,6 +33,7 @@ pip install -r requirements.txt
 
 # Run the demo script
 python demo.py
+```
 
 ## 5. Contact
 For any questions regarding the code or the methodology, please feel free to open an Issue in this repository, or contact via email at 2024110101007@zjou.edu.cn.
