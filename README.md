@@ -16,7 +16,7 @@ The model couples:
 - `requirements.txt`: Environment dependencies for the model and data processing pipelines.
 
 ## 3. Data Description & Usage
-To facilitate quick verification of the model architecture without requiring the download of massive terabyte-scale netCDF climate files, the current `demo.py` utilizes **synthetic data tensors** (`torch.randn`). This allows researchers and users to test the structural correctness and gradient updates instantly on local machines.
+To facilitate quick verification of the model architecture without requiring the download of massive gigabyte-scale netCDF climate files, the current `demo.py` utilizes **synthetic data tensors** (`torch.randn`). This allows researchers and users to test the structural correctness and gradient updates instantly on local machines.
 
 ### Expected Input Shape
 If you wish to test the model with your own regional ocean dataset, please ensure the input tensor shape matches:
@@ -33,3 +33,6 @@ pip install -r requirements.txt
 
 # Run the demo script
 python demo.py
+
+## 5. Contact
+For any questions regarding the code or the methodology, please feel free to open an Issue in this repository, or contact via email at 2024110101007@zjou.edu.cn.
