@@ -1,39 +1,32 @@
-# Deep Learning-Based Prediction of Marine Heatwaves in the East China Sea
+# SwinTrans-ConvLSTM for SST Forecasting in the East China Sea
 
-This repository provides the official PyTorch implementation of the **SwinTrans-ConvLSTM** model for marine heatwave (MHW) prediction.
+SwinTrans-ConvLSTM combines a shifted-window Transformer for spatial feature extraction with ConvLSTM for temporal modeling. It was developed to forecast daily sea surface temperature (SST) in the East China Sea and support the evaluation of marine heatwave (MHW) forecasts.
 
-## 1. Overview
-Accurate sea surface temperature (SST) and MHW prediction in highly dynamic shelf seas is challenging. This repository contains the core network architecture and a minimal reproducible example to demonstrate our hybrid spatiotemporal framework. 
+## What is available here
 
-The model couples:
-- **Swin Transformer**: For global spatial representation.
-- **ConvLSTM**: For local temporal-evolution modeling.
-- **Physics-Informed Curriculum Loss**: Integrating air-sea physical constraints (e.g., spatial gradients) and Online Hard Example Mining (OHEM) to capture extreme MHW events effectively.
+This repository currently contains a PyTorch model and a demonstration that uses synthetic inputs and targets. The demo illustrates one training step, including a forward pass, loss calculation, and parameter update. It does not use observed SST or produce the forecasts, figures, or tables reported in the manuscript.
 
-## 2. Repository Structure
-- `model.py`: Contains the class definitions for the SwinTrans-ConvLSTM architecture and the custom loss function.
-- `demo.py`: A minimal reproducible script to run a forward and backward pass of the model.
-- `requirements.txt`: Environment dependencies for the model and data processing pipelines.
+| File | Purpose |
+| --- | --- |
+| [`model.py`](model.py) | Network architecture and loss used in the demonstration |
+| [`demo.py`](demo.py) | Training step on synthetic tensors |
+| [`requirements.txt`](requirements.txt) | Python dependencies listed for this repository |
 
-## 3. Data Description & Usage
-To facilitate quick verification of the model architecture without requiring the download of massive gigabyte-scale netCDF climate files, the current `demo.py` utilizes **synthetic data tensors** (`torch.randn`). This allows researchers and users to test the structural correctness and gradient updates instantly on local machines.
-
-### Expected Input Shape
-If you wish to test the model with your own regional ocean dataset, please ensure the input tensor shape matches:
-`[Batch_Size, Spatial_H, Spatial_W, Time_Window, Features]`
-
-*(Note: The full data processing scripts, from raw netCDF to model inputs, will be fully open-sourced following the publication of our related research.)*
-
-## 4. Quick Start
-To verify the model architecture, set up the environment and execute the following commands:
+## Run the demonstration
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the demo script
+python -m pip install -r requirements.txt
 python demo.py
 ```
 
-## 5. Contact
-For any questions regarding the code or the methodology, please feel free to open an Issue in this repository, or contact via email at 2024110101007@zjou.edu.cn.
+The demo input is ordered as `[batch, latitude, longitude, input day, feature]`. Its feature channels and targets are synthetic; the demo configuration does not document the manuscript's input feature set or training protocol.
+
+## Study workflow
+
+In the manuscript, each forecast uses 14 days of inputs ending on the initialization date and generates daily SST forecasts for the following seven days from that initialization. Predictors include features derived from the air–sea temperature difference and surface wind. ERA5 inputs are restricted to the historical input window. Forecasts are evaluated against daily OSTIA SST fields for 2020–2024. The study assesses continuous SST errors and evaluates MHW event days and event characteristics separately.
+
+The data preparation, training, baseline, and evaluation scripts needed to reproduce those results are not included in the current repository. The synthetic demonstration does not require OSTIA or ERA5 data.
+
+## License and questions
+
+The code is available under the [MIT License](LICENSE). For questions about the released code, please open a [GitHub issue](https://github.com/ZefangMa/MHW-Prediction-SwinTrans/issues).
