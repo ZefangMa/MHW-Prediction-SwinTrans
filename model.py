@@ -1,17 +1,10 @@
-# -*- coding: utf-8 -*-
-"""
-==========================================================================================
-Core Model Definitions: SwinTrans-ConvLSTM & Physics-Informed Curriculum Loss
-Manuscript: "Deep Learning-Based Prediction of Marine Heatwaves in the East China Sea"
-==========================================================================================
-"""
+"""SwinTrans-ConvLSTM model components for direct multi-lead SST forecasting."""
+
 import torch
-import torch.nn as nn
+from torch import nn
 from einops import rearrange
 
-# ==============================================================================
-# --- 1. ConvLSTM Components for Temporal Evolution ---
-# ==============================================================================
+
 class ConvLSTMCell(nn.Module):
     def __init__(self, input_dim, hidden_dim, kernel_size, bias):
         super(ConvLSTMCell, self).__init__()
@@ -43,12 +36,17 @@ class ConvLSTMCell(nn.Module):
 
 
 class ConvLSTM(nn.Module):
-    def __init__(self, input_dim, hidden_dim, kernel_size, num_layers, batch_first=False, bias=True, return_all_layers=False):
+    def __init__(self, input_dim, hidden_dim, kernel_size, num_layers, batch_first=False, bias=True,
+                 return_all_layers=False):
         super(ConvLSTM, self).__init__()
         self.input_dim = input_dim
+
         self.kernel_size = self._extend_for_multilayer(kernel_size, num_layers)
         self.hidden_dim = self._extend_for_multilayer(hidden_dim, num_layers)
-        
+
+        if not len(self.kernel_size) == len(self.hidden_dim) == num_layers:
+            raise ValueError('Inconsistent list length.')
+
         self.num_layers = num_layers
         self.batch_first = batch_first
         self.bias = bias
@@ -64,16 +62,11 @@ class ConvLSTM(nn.Module):
         self.cell_list = nn.ModuleList(cell_list)
 
     def forward(self, input_tensor, hidden_state=None):
-        if not self.batch_first: 
-            input_tensor = input_tensor.permute(1, 0, 2, 3, 4)
+        if not self.batch_first: input_tensor = input_tensor.permute(1, 0, 2, 3, 4)
         b, seq_len, _, h, w = input_tensor.size()
-        
-        if hidden_state is None: 
-            hidden_state = self._init_hidden(batch_size=b, image_size=(h, w))
-            
+        if hidden_state is None: hidden_state = self._init_hidden(batch_size=b, image_size=(h, w))
         layer_output_list, last_state_list = [], []
         cur_layer_input = input_tensor
-        
         for layer_idx in range(self.num_layers):
             h, c = hidden_state[layer_idx]
             output_inner = []
@@ -84,13 +77,20 @@ class ConvLSTM(nn.Module):
             cur_layer_input = layer_output
             layer_output_list.append(layer_output)
             last_state_list.append([h, c])
-            
-        if not self.return_all_layers: 
-            layer_output_list, last_state_list = layer_output_list[-1:], last_state_list[-1:]
+        if not self.return_all_layers: layer_output_list, last_state_list = layer_output_list[-1:], last_state_list[-1:]
         return layer_output_list, last_state_list
 
     def _init_hidden(self, batch_size, image_size):
         return [self.cell_list[i].init_hidden(batch_size, image_size) for i in range(self.num_layers)]
+
+    @staticmethod
+    def _check_kernel_size_consistency(kernel_size):
+        candidates = kernel_size if isinstance(kernel_size, list) else [kernel_size]
+        for kernel in candidates:
+            sizes = (kernel, kernel) if isinstance(kernel, int) else kernel
+            if (not isinstance(sizes, tuple) or len(sizes) != 2
+                    or any(not isinstance(k, int) or k < 1 or k % 2 == 0 for k in sizes)):
+                raise ValueError("ConvLSTM kernels must be positive odd integers.")
 
     @staticmethod
     def _extend_for_multilayer(param, num_layers):
@@ -98,9 +98,7 @@ class ConvLSTM(nn.Module):
             return [param] * num_layers
         return param
 
-# ==============================================================================
-# --- 2. Swin Transformer Components for Spatial Representation ---
-# ==============================================================================
+
 class WindowAttention(nn.Module):
     def __init__(self, dim, window_size, num_heads):
         super().__init__()
@@ -109,8 +107,6 @@ class WindowAttention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
         self.softmax = nn.Softmax(dim=-1)
-        
-        # Relative position bias table
         self.relative_position_bias_table = nn.Parameter(
             torch.zeros((2 * window_size - 1) * (2 * window_size - 1), num_heads))
         coords = torch.stack(torch.meshgrid([torch.arange(window_size), torch.arange(window_size)], indexing="ij"))
@@ -129,20 +125,18 @@ class WindowAttention(nn.Module):
         qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         attn = (q * self.scale @ k.transpose(-2, -1))
-        
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
             self.window_size * self.window_size, self.window_size * self.window_size, -1).permute(2, 0, 1).contiguous()
         attn = attn + relative_position_bias.unsqueeze(0)
-        
         if mask is not None:
             nW = mask.shape[0]
             attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
             attn = attn.view(-1, self.num_heads, N, N)
-            
         attn = self.softmax(attn)
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
         x = self.proj(x)
         return x
+
 
 class SwinTransformerBlock(nn.Module):
     def __init__(self, dim, num_heads, window_size=7, shift_size=0, ffn_ratio=4.0):
@@ -157,39 +151,43 @@ class SwinTransformerBlock(nn.Module):
         B, L, C = x.shape
         shortcut = x
         x = self.norm1(x).view(B, H, W, C)
-        
-        # Cyclic shift
-        shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2)) if self.shift_size > 0 else x
-        
-        # Partition windows
-        x_windows = rearrange(shifted_x, 'b (h h_w) (w w_w) c -> (b h w) (h_w w_w) c', h_w=self.window_size, w_w=self.window_size)
-        
-        # W-MSA / SW-MSA
+        shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size),
+                               dims=(1, 2)) if self.shift_size > 0 else x
+        x_windows = rearrange(shifted_x, 'b (h h_w) (w w_w) c -> (b h w) (h_w w_w) c', h_w=self.window_size,
+                              w_w=self.window_size)
         attn_windows = self.attn(x_windows, mask=None)
-        
-        # Merge windows
         shifted_x = rearrange(attn_windows, '(b h w) (h_w w_w) c -> b (h h_w) (w w_w) c', h=H // self.window_size,
                               w=W // self.window_size, h_w=self.window_size, w_w=self.window_size)
-        
-        # Reverse cyclic shift
-        x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2)) if self.shift_size > 0 else shifted_x
-        
+        x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size),
+                       dims=(1, 2)) if self.shift_size > 0 else shifted_x
         x = x.view(B, L, C)
         x = shortcut + x
         x = x + self.ffn(self.norm2(x))
         return x
 
-# ==============================================================================
-# --- 3. Hybrid Model: SwinTrans-ConvLSTM ---
-# ==============================================================================
+
 class SwinConvLSTMModel(nn.Module):
-    def __init__(self, input_dim, spatial_dims, pred_steps, convlstm_hidden_dim=64, convlstm_kernel_size=3,
-                 convlstm_num_layers=1, d_model=96, n_heads=[3, 6], num_encoder_layers=2, window_size=10, dropout=0.2):
+    """Jointly predict all lead days from one [batch, lat, lon, time, feature] tensor.
+
+    Returns [batch, lat, lon, lead]. This module learns in the target units
+    provided during training; the demo uses standardized SST anomalies.
+    """
+
+    def __init__(self, input_dim, spatial_dims, pred_steps=7, convlstm_hidden_dim=64,
+                 convlstm_kernel_size=3, convlstm_num_layers=1, d_model=96,
+                 n_heads=(3, 6), num_encoder_layers=2, window_size=10, dropout=0.2):
         super().__init__()
         self.H, self.W = spatial_dims
+        self.input_dim = input_dim
         self.pred_steps = pred_steps
-        
-        # 1. Local Temporal Evolution Extraction
+        if window_size < 1 or min(self.H, self.W) < 1 or self.H % window_size or self.W % window_size:
+            raise ValueError("Grid dimensions must be positive multiples of the attention window.")
+        if not n_heads or any(head < 1 or d_model % head for head in n_heads):
+            raise ValueError("Each attention head count must be a positive divisor of d_model.")
+        if min(input_dim, pred_steps, convlstm_hidden_dim, convlstm_num_layers, num_encoder_layers) < 1:
+            raise ValueError("Channel counts, lead count, and layer counts must be positive.")
+        ConvLSTM._check_kernel_size_consistency(convlstm_kernel_size)
+        # dropout is retained for compatibility with the original constructor.
         self.temporal_encoder = ConvLSTM(
             input_dim=input_dim,
             hidden_dim=convlstm_hidden_dim,
@@ -198,12 +196,8 @@ class SwinConvLSTMModel(nn.Module):
             batch_first=True,
             bias=True
         )
-        
-        # Projection and Positional Embedding
         self.input_proj = nn.Conv2d(convlstm_hidden_dim, d_model, kernel_size=1)
         self.pos_embed = nn.Conv2d(d_model, d_model, kernel_size=3, padding=1, groups=d_model)
-        
-        # 2. Global Spatial Representation Extraction
         self.encoder_blocks = nn.ModuleList([
             SwinTransformerBlock(
                 dim=d_model,
@@ -212,8 +206,6 @@ class SwinConvLSTMModel(nn.Module):
                 shift_size=0 if (i % 2 == 0) else window_size // 2
             ) for i in range(num_encoder_layers)
         ])
-        
-        # 3. Final Prediction Decoder
         self.decoder = nn.Sequential(
             nn.Conv2d(d_model, d_model * 2, kernel_size=3, padding=1),
             nn.GELU(),
@@ -230,72 +222,115 @@ class SwinConvLSTMModel(nn.Module):
             nn.init.constant_(m.weight, 1.0)
         elif isinstance(m, nn.Conv2d):
             nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+        elif isinstance(m, ConvLSTMCell):
+            for name, param in m.named_parameters():
+                if 'weight_ih' in name:
+                    nn.init.xavier_uniform_(param.data)
+                elif 'weight_hh' in name:
+                    nn.init.orthogonal_(param.data)
+                elif 'bias' in name:
+                    param.data.fill_(0)
 
     def forward(self, x):
-        # Input shape: [Batch, Height, Width, Time, Features]
-        B, H, W, T, F = x.shape
-        
-        # Reshape for ConvLSTM: [Batch, Time, Features, Height, Width]
+        if x.ndim != 5 or x.shape[1:3] != (self.H, self.W) or x.shape[-1] != self.input_dim:
+            raise ValueError("Expected inputs shaped [batch, latitude, longitude, time, feature].")
+        B, H, W, T, _ = x.shape
+        if T < 1:
+            raise ValueError("Provide at least one historical input day.")
         x = x.permute(0, 3, 4, 1, 2).contiguous()
-        
-        # Temporal encoding
         _, last_state_list = self.temporal_encoder(x)
         x_temporal_encoded = last_state_list[-1][0]
-        
-        # Projection & Embedding
         x_proj = self.input_proj(x_temporal_encoded)
         pos_feat = self.pos_embed(x_proj)
         x = x_proj.flatten(2).transpose(1, 2) + pos_feat.flatten(2).transpose(1, 2)
-        
-        # Swin Transformer Blocks
         for block in self.encoder_blocks:
             x = block(x, H, W)
-            
-        # Decode to forecast steps
         x = x.transpose(1, 2).view(B, -1, H, W)
         prediction_raw = self.decoder(x)
-        
-        # Output shape: [Batch, Height, Width, Pred_Steps]
         return prediction_raw.permute(0, 2, 3, 1).contiguous()
 
-# ==============================================================================
-# --- 4. Custom Physics-Informed Curriculum Loss ---
-# ==============================================================================
-class PhysicsCurriculumLoss(nn.Module):
-    def __init__(self, start_ohem_epoch=20, ohem_ratio=0.2, grad_weight=1.0):
+
+class CurriculumGradientLoss(nn.Module):
+    """Apply Huber loss, optional hard-example mining, and spatial-gradient regularization.
+
+    Predictions and targets are [batch, lead, latitude, longitude].
+    The ocean mask is [latitude, longitude], with True for ocean.
+    Nonfinite targets and land are excluded, including from gradient pairs.
+    """
+
+    def __init__(self, ocean_mask, ohem_start_epoch=20, ohem_ratio=0.20, gradient_weight=1.0):
         super().__init__()
-        self.start_ohem_epoch = start_ohem_epoch
+        if not 0 < ohem_ratio <= 1 or ohem_start_epoch < 0 or gradient_weight < 0:
+            raise ValueError("Invalid hard-example mining or gradient weight setting.")
+        ocean_mask = torch.as_tensor(ocean_mask, dtype=torch.bool)
+        if ocean_mask.ndim != 2 or not bool(ocean_mask.any()):
+            raise ValueError("ocean_mask must be a two-dimensional mask with at least one ocean cell.")
+        self.register_buffer("ocean_mask", ocean_mask[None, None])
+        self.ohem_start_epoch = ohem_start_epoch
         self.ohem_ratio = ohem_ratio
-        self.grad_weight = grad_weight
-        self.criterion = nn.HuberLoss(reduction='none')
+        self.gradient_weight = gradient_weight
+        self.huber = nn.HuberLoss(delta=1.0, reduction="none")
 
-    def _compute_spatial_gradient(self, image):
-        dy = torch.abs(image[:, :, 1:, :] - image[:, :, :-1, :])
-        dx = torch.abs(image[:, :, :, 1:] - image[:, :, :, :-1])
-        return dy, dx
+    @staticmethod
+    def _masked_average(values, valid):
+        if not bool(valid.any()):
+            return values.sum() * 0.0
+        return values[valid].mean()
 
-    def forward(self, outputs, targets, seasonal_weights, current_epoch):
-        # 1. Base Element-wise Loss with Seasonal Weighting
-        loss_per_element = self.criterion(outputs, targets)
-        weighted_loss = loss_per_element * seasonal_weights
-
-        # 2. Curriculum Learning Strategy: Global Mean -> OHEM
-        if current_epoch < self.start_ohem_epoch:
-            base_loss = weighted_loss.mean()
+    def forward(self, pred_sst, true_sst, seasonal_weights=1.0, epoch=0):
+        if (pred_sst.ndim != 4 or pred_sst.shape != true_sst.shape
+                or pred_sst.shape[-2:] != self.ocean_mask.shape[-2:]):
+            raise ValueError("Predictions and targets must match [batch, lead, latitude, longitude].")
+        valid = torch.isfinite(true_sst) & self.ocean_mask
+        if not bool(valid.any()):
+            raise ValueError("This batch has no valid ocean targets.")
+        if not bool(torch.isfinite(pred_sst[valid]).all()):
+            raise FloatingPointError("Predictions must be finite where ocean targets are valid.")
+        true_safe = torch.where(valid, true_sst, torch.zeros_like(true_sst))
+        pred_safe = torch.where(valid, pred_sst, torch.zeros_like(pred_sst))
+        element_loss = self.huber(pred_safe, true_safe) * seasonal_weights
+        valid_losses = element_loss[valid]
+        if epoch < self.ohem_start_epoch:
+            base_loss = valid_losses.mean()
         else:
-            # Online Hard Example Mining (OHEM) for extreme events
-            loss_flat = weighted_loss.reshape(-1)
-            k = int(loss_flat.numel() * self.ohem_ratio)
-            k = max(k, 1)
-            topk_loss, _ = torch.topk(loss_flat, k)
-            base_loss = topk_loss.mean()
+            k = max(1, int(valid_losses.numel() * self.ohem_ratio))
+            base_loss = torch.topk(valid_losses, k).values.mean()
+        # Only include adjacent pairs of valid ocean targets.
+        dy_valid = valid[:, :, 1:, :] & valid[:, :, :-1, :]
+        dx_valid = valid[:, :, :, 1:] & valid[:, :, :, :-1]
+        dy_pred = torch.abs(pred_safe[:, :, 1:, :] - pred_safe[:, :, :-1, :])
+        dy_true = torch.abs(true_safe[:, :, 1:, :] - true_safe[:, :, :-1, :])
+        dx_pred = torch.abs(pred_safe[:, :, :, 1:] - pred_safe[:, :, :, :-1])
+        dx_true = torch.abs(true_safe[:, :, :, 1:] - true_safe[:, :, :, :-1])
+        gradient = self._masked_average(torch.abs(dy_pred - dy_true), dy_valid)
+        gradient = gradient + self._masked_average(torch.abs(dx_pred - dx_true), dx_valid)
+        return base_loss + self.gradient_weight * gradient
 
-        # 3. Physics-Informed Spatial Gradient Constraint
-        grad_pred_y, grad_pred_x = self._compute_spatial_gradient(outputs)
-        grad_true_y, grad_true_x = self._compute_spatial_gradient(targets)
-        
-        loss_grad_y = nn.L1Loss()(grad_pred_y, grad_true_y)
-        loss_grad_x = nn.L1Loss()(grad_pred_x, grad_true_x)
-        gradient_loss = self.grad_weight * (loss_grad_y + loss_grad_x)
 
-        return base_loss + gradient_loss
+@torch.no_grad()
+def predict_sst(model, inputs, reference_sst, target_mean, target_std, ocean_mask, *, flip_average=False):
+    """Return SST in Celsius as [batch, lead, latitude, longitude].
+
+    Pass a model in evaluation mode and training-derived reference statistics
+    broadcastable to the forecast grid. The mask marks ocean with True.
+    Optional longitude flip averaging uses only the same historical inputs.
+    """
+    standardized = model(inputs).permute(0, 3, 1, 2)
+    if flip_average:
+        flipped = model(inputs.flip(dims=(2,))).permute(0, 3, 1, 2)
+        standardized = (standardized + flipped.flip(dims=(3,))) / 2
+
+    standardized = standardized.float()
+    def as_forecast_tensor(value):
+        return torch.as_tensor(value, dtype=standardized.dtype, device=standardized.device)
+
+    reference_sst = as_forecast_tensor(reference_sst)
+    target_mean = as_forecast_tensor(target_mean)
+    target_std = as_forecast_tensor(target_std)
+    ocean_mask = torch.as_tensor(ocean_mask, dtype=torch.bool, device=standardized.device)
+    if ocean_mask.shape != standardized.shape[-2:]:
+        raise ValueError("The ocean mask must match the forecast grid.")
+    sst = standardized * target_std + target_mean + reference_sst
+    if sst.shape != standardized.shape:
+        raise ValueError("Reference statistics must broadcast to [batch, lead, latitude, longitude].")
+    return sst.masked_fill(~ocean_mask, float("nan"))
